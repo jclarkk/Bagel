@@ -82,7 +82,21 @@ def load_bagel(
         no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
     )
 
-    for k in [
+    try:
+        anchor = "language_model.model.embed_tokens"
+        _ = device_map[anchor]
+    except KeyError:
+        # fall back to first key that lives inside language_model and ends with 'embed_tokens'
+        anchor_candidates = [
+            k for k in device_map.keys() if k.startswith("language_model") and "embed_tokens" in k
+        ]
+        if not anchor_candidates:
+            # unlikely but safe
+            anchor = list(device_map.keys())[0]
+        else:
+            anchor = anchor_candidates[0]
+
+    same_device_blobs = [
         "language_model.model.embed_tokens",
         "time_embedder",
         "latent_pos_embed",
@@ -90,8 +104,10 @@ def load_bagel(
         "llm2vae",
         "connector",
         "vit_pos_embed",
-    ]:
-        device_map[k] = device_map["language_model.model.embed_tokens"]
+    ]
+    for k in same_device_blobs:
+        if k in device_map:
+            device_map[k] = device_map[anchor]
 
     if offload_dir is None:
         offload_dir = tempfile.mkdtemp(prefix="bagel_offload_")
@@ -152,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", default="output.png", help="Path to save resulting image (if any)")
     p.add_argument("--think", action="store_true", help="Enable chain‑of‑thought reasoning")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument('--max_mem_per_gpu', type=int, default=40)
+    p.add_argument('--max_mem_per_gpu', type=int, default="40GiB")
     p.add_argument("--hparams_json", help="JSON string or file with inference hyper‑parameters")
     p.add_argument(
         "--offload_dir",
