@@ -828,7 +828,10 @@ class Bagel(PreTrainedModel):
                 norm_v_t_text_ = torch.norm(v_t_text_, dim=-1, keepdim=True)
                 scale = (norm_v_t / (norm_v_t_text_ + 1e-8)).clamp(min=cfg_renorm_min, max=1.0)
                 v_t_text = v_t_text_ * scale
-                v_t = cfg_img_v_t + cfg_img_scale * (v_t_text - cfg_img_v_t)
+                if cfg_img_scale > 1.0:
+                    v_t = cfg_img_v_t + cfg_img_scale * (v_t_text - cfg_img_v_t)
+                else:
+                    v_t = v_t_text
             else:
                 v_t_text_ = cfg_text_v_t + cfg_text_scale * (v_t - cfg_text_v_t)
                 
