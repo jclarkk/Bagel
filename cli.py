@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from accelerate import (
@@ -26,6 +27,17 @@ def _safe_embedding(weight, input, *args, **kwargs):
 
 
 F.embedding = _safe_embedding
+
+_real_linear_forward = nn.Linear.forward
+
+
+def _safe_linear_forward(self, input, *args, **kwargs):
+    if input.device != self.weight.device:
+        input = input.to(self.weight.device)
+    return _real_linear_forward(self, input, *args, **kwargs)
+
+
+nn.Linear.forward = _safe_linear_forward
 
 from data.transforms import ImageTransform
 from data.data_utils import add_special_tokens
@@ -53,9 +65,15 @@ def set_seed(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+def _canonicalize_mem(mem: str | int | float) -> str:
+    if isinstance(mem, str):
+        return mem if mem.lower().endswith("gib") else f"{mem}GiB"
+    return f"{mem}GiB"
+
+
 def load_bagel(
         model_path: str,
-        max_mem_per_gpu: str = "40GiB",
+        max_mem_per_gpu: str | int | float = "40GiB",
         dtype: torch.dtype = torch.bfloat16,
         offload_dir: Optional[str] = None,
 ):
@@ -88,27 +106,16 @@ def load_bagel(
         model = Bagel(language_model, vit_model, bagel_cfg)
         model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
 
+    max_mem_per_gpu = _canonicalize_mem(max_mem_per_gpu)
     device_map = infer_auto_device_map(
         model,
         max_memory={i: max_mem_per_gpu for i in range(torch.cuda.device_count())},
         no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
     )
 
-    try:
-        anchor = "language_model.model.embed_tokens"
-        _ = device_map[anchor]
-    except KeyError:
-        # fall back to first key that lives inside language_model and ends with 'embed_tokens'
-        anchor_candidates = [
-            k for k in device_map.keys() if k.startswith("language_model") and "embed_tokens" in k
-        ]
-        if not anchor_candidates:
-            # unlikely but safe
-            anchor = list(device_map.keys())[0]
-        else:
-            anchor = anchor_candidates[0]
-
-    same_device_blobs = [
+    anchor_candidates = [k for k in device_map if "embed_tokens" in k]
+    anchor = anchor_candidates[0] if anchor_candidates else next(iter(device_map))
+    coupled = [
         "language_model.model.embed_tokens",
         "time_embedder",
         "latent_pos_embed",
@@ -117,22 +124,29 @@ def load_bagel(
         "connector",
         "vit_pos_embed",
     ]
-    for k in same_device_blobs:
+    for k in coupled:
         if k in device_map:
             device_map[k] = device_map[anchor]
 
-    if offload_dir is None:
+    needs_disk = any(v == "disk" for v in device_map.values())
+    if needs_disk and offload_dir is None:
         offload_dir = tempfile.mkdtemp(prefix="bagel_offload_")
-    os.makedirs(offload_dir, exist_ok=True)
+        print(f"[bagel_cli] Some layers set to 'disk'; using offload dir: {offload_dir}")
+    if offload_dir is not None:
+        os.makedirs(offload_dir, exist_ok=True)
 
-    model = load_checkpoint_and_dispatch(
-        model,
+    device_map = {k: ("cpu" if v == "disk" else v) for k, v in device_map.items()}
+
+    load_kwargs = dict(
         checkpoint=os.path.join(model_path, "ema.safetensors"),
         device_map=device_map,
         offload_buffers=True,
-        offload_folder=offload_dir,
         dtype=dtype,
-    ).eval()
+    )
+    if offload_dir is not None:
+        load_kwargs["offload_folder"] = offload_dir
+
+    model = load_checkpoint_and_dispatch(model, **load_kwargs).eval()
 
     tokenizer = Qwen2Tokenizer.from_pretrained(model_path)
     tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
@@ -140,7 +154,7 @@ def load_bagel(
     vae_transform = ImageTransform(1024, 512, 16)
     vit_transform = ImageTransform(980, 224, 14)
 
-    inferencer = InterleaveInferencer(
+    return InterleaveInferencer(
         model=model,
         vae_model=vae_model,
         tokenizer=tokenizer,
@@ -148,7 +162,6 @@ def load_bagel(
         vit_transform=vit_transform,
         new_token_ids=new_token_ids,
     )
-    return inferencer
 
 
 _DEFAULT_INFER_HYPER = dict(
