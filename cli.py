@@ -8,12 +8,24 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from accelerate import (
     init_empty_weights,
     infer_auto_device_map,
     load_checkpoint_and_dispatch,
 )
+
+_real_embedding = F.embedding
+
+
+def _safe_embedding(weight, input, *args, **kwargs):
+    if input.device != weight.device:
+        input = input.to(weight.device)
+    return _real_embedding(weight, input, *args, **kwargs)
+
+
+F.embedding = _safe_embedding
 
 from data.transforms import ImageTransform
 from data.data_utils import add_special_tokens
@@ -228,4 +240,3 @@ if __name__ == "__main__":
     main()
     t1 = time.time()
     print(f"Total time: {t1 - t0:.2f} seconds")
-
