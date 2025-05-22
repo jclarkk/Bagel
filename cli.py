@@ -168,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", default="output.png", help="Path to save resulting image (if any)")
     p.add_argument("--think", action="store_true", help="Enable chain‑of‑thought reasoning")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument('--max_mem_per_gpu', type=int, default="40GiB")
+    p.add_argument('--max_mem_per_gpu', type=str, default="40GiB")
     p.add_argument("--hparams_json", help="JSON string or file with inference hyper‑parameters")
     p.add_argument(
         "--offload_dir",
